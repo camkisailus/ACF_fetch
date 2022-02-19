@@ -1,3 +1,4 @@
+#!/home/cuhsailus/anaconda3/envs/acf/bin/python
 import os
 import numpy as np
 import torch
@@ -8,33 +9,41 @@ import cv2
 import glob
 from PIL import Image
 from scipy.spatial.transform import Rotation
+import threading
+import uuid
 
 import aff_cf_model
 import acfutils.common_utils as utils
 import config
 
+import tf
 import rospy
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 from sensor_msgs.msg import Image
+from std_msgs.msg import Bool
 from cv_bridge import CvBridge
-from ACF_perception.msg import SceneObject, SceneObjectArray
+from acf_network.msg import SceneObject, SceneObjectArray
 
 
 RGB_IMAGE_TOPIC = "/head_camera/rgb/image_raw"
 DEPTH_IMAGE_TOPIC = "/head_camera/depth/image_raw"
 INPUT_MODE = "RBGD"
-CHECKPOINT_PATH = "best_loss_RGBD_epoch90.pth"
+CHECKPOINT_PATH = "/home/cuhsailus/Desktop/ACF_fetch/src/acf_network/src/best_loss_RGBD_epoch90.pth"
 DATASET = "real_world"
 OUT_DIR = "/home/cuhsailus/Desktop/affordance_coordinate_frame/out/"
 MASK_ALPHA = 0.6
 
 class Object():
     def __init__(self, obj_name, kp1, ax1, kp2=None, ax2=None):
-        self.id = obj_name
+        self.id = uuid.uuid4() #unique identifier
+        self.name = obj_name
         self.kp1 = kp1
         self.ax1 = ax1
         self.kp2 = kp2
         self.ax2 = ax2
+    
+    def __hash__(self):
+        return hash(self.id)
     
     def __eq__(self, other):
         k1_eq = self.kp1 == other.kp1
@@ -56,50 +65,77 @@ class ACF_Detector():
                    "handle": 2,
                    "stir": 3,
                    "head": 4}
+        self.classes_inverse = {self.classes[key]: key for key in self.classes}
         self.camera_matrix = np.array([[536.544, 0., 324.149],
                             [0., 537.666, 224.299],
                             [0., 0., 1.]])
         self.object_classes = {0: "mug", 1:"bottle", 2:"spoon/spatula", 3:"other_container"}
         self.acf_labels = {1:"container", 2:"handle", 3:"stir", 4:"scoop"}
         self.current_detections = []
+        self._rgb_img = None
+        self._depth_img = None
+        self._cam_pose = None
+        self._lock = threading.RLock()
 
         #ROS stuff
         rgb_sub = Subscriber(RGB_IMAGE_TOPIC, Image)
         depth_sub = Subscriber(DEPTH_IMAGE_TOPIC, Image)
         ts = ApproximateTimeSynchronizer([rgb_sub, depth_sub], 2, 0.5)
-        ts.registerCallback(self.callback)
+        ts.registerCallback(self.img_callback)
         self.bridge = CvBridge()
         self.i = 0
-        self.image_pub = rospy.Publisher("/ACF_Detector/RGB_IN", Image, queue_size=100)
-        self.scene_obj_pub = rospy.Publisher("/ACF_detector/scene_objects", SceneObjectArray, queue_size=10)
+        self.image_pub = rospy.Publisher("/ACF_Network/detections/Image", Image, queue_size=10)
+        self.scene_obj_pub = rospy.Publisher("/ACF_Network/detections/scene_objects", SceneObjectArray, queue_size=10)
+        self.detect_sub = rospy.Subscriber("/ACF_Network/run_network", Bool, self.detection_callback)
+        self.tf_listener = tf.TransfromListener()
 
+    def img_callback(self, rgb_msg, depth_msg):
+        rospy.logwarn("Got images")
+        with self._lock:
+            self._rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg)
+            self._rgb_img = cv2.cvtColor(self._rgb_img, cv2.COLOR_BGR2RGB)
+            self._depth_img = self.bridge.imgmsg_to_cv2(depth_msg)
+            # t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_link')
+            # self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_link', t)
+            # print(self._cam_pose)
+    
+        
 
-    def callback(self, rgb_msg, depth_msg):
-        print("IN CALLBACK")
-        self.current_detections.clear()
-        rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg)
-        rgb_img = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB)
-        depth_img = self.bridge.imgmsg_to_cv2(depth_msg)
-        image_rgb = np.array(cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB)).astype(np.float32) / 255
-        image_depth = TF.to_tensor(depth_img.astype(np.float32) / 10).to(self.device)
-        image_depth_tensor = TF.to_tensor(self.depth2normal(depth_img)).type(torch.float32)
-        image_rgb_tensor = TF.to_tensor(image_rgb)
-        img = torch.cat((image_rgb_tensor, image_depth_tensor), dim=0)
-        img = img.unsqueeze(0)
+    def detection_callback(self, msg):
+        rospy.logwarn("Received call to run network. Running...")
+        # print("IN CALLBACK")
+        if self._rgb_img is None or self._depth_img is None:
+            rospy.logwarn("ACF Detector hasn't gotten RGB and/or Depth imgs yet...RETURNING")
+            return
+        # print("Running network")
+        with self._lock:
+            self.current_detections.clear()
+            image_rgb = np.array(self._rgb_img).astype(np.float32) / 255
+            image_depth = TF.to_tensor(self._depth_img.astype(np.float32) / 10).to(self.device)
+            image_depth_tensor = TF.to_tensor(self.depth2normal(self._depth_img)).type(torch.float32)
+            image_rgb_tensor = TF.to_tensor(image_rgb)
+            img = torch.cat((image_rgb_tensor, image_depth_tensor), dim=0)
+            img = img.unsqueeze(0)
 
-        img = img.to(self.device)
+            img = img.to(self.device)
 
-        with torch.no_grad():
-            detections, _ = self.model(img)
+            with torch.no_grad():
+                detections, _ = self.model(img)
+            print("GOT DETECTIONS")
 
-        proposals = utils.post_process_proposals(detections, image_depth, K=config.BOX_POSTPROCESS_NUMBER, camera_mat = self.camera_matrix)
-        try:
-            final_pafs_pair = utils.pafprocess(proposals, self.camera_matrix)
-        except:
-            rospy.WARN("paf ERROR")
-            final_pafs_pair = None
-        #self.visualize(rgb_img, proposals, [None], self.classes, self.camera_matrix, final_pafs_pair)
+            proposals = utils.post_process_proposals(detections, image_depth, img_shape=(480,640), K=config.BOX_POSTPROCESS_NUMBER, camera_mat = self.camera_matrix)
+            print("GOT PROPOSALS")
+            try:
+                final_pafs_pair = utils.pafprocess(proposals, self.camera_matrix)
+            except:
+                rospy.logwarn("paf ERROR")
+                final_pafs_pair = None
+            print("GOT PAF PAIRS")
+            self.visualize(self._rgb_img.copy(), proposals, [None], final_pafs_pair)
         self.group_objects(proposals, final_pafs_pair)
+        self.publish_detections()
+        
+    def publish_detections(self):
         self.scene_obj_msgs = []
         for obj in self.current_detections:
             msg = SceneObject()
@@ -130,43 +166,80 @@ class ACF_Detector():
         arr_msg.scene_objects = self.scene_obj_msgs
         self.scene_obj_pub.publish(arr_msg)
 
-    
+        
     def group_objects(self, proposals, final_pafs_pair):
-        assert(len(proposals) == 1)
+        print("Grouping objects")
         axes = proposals[0]['axis'].tolist()
         keypoints_3d = proposals[0]['keypoints_3d'].tolist()
-        # for p in proposals:
-            # get all keypoints
-            # keypoints_3d = p['keypoints_3d']
-            # keypoints_u = keypoints_3d[:, 0] / keypoints_3d[:, 2] * self.camera_matrix[0, 0] + self.camera_matrix[0, 2]
-            # keypoints_v = keypoints_3d[:, 1] / keypoints_3d[:, 2] * self.camera_matrix[1, 1] + self.camera_matrix[1, 2]
-            # keypoints = torch.stack((keypoints_u, keypoints_v), dim=1).cpu().numpy().tolist()
-            # for kp in keypoints:
-            #     print(kp)
-        for i in range(len(final_pafs_pair)):
-            pair = final_pafs_pair[i][0] #final_pafs_pair is list of lists
-            kp1 = keypoints_3d[pair[0]]
-            kp2 = keypoints_3d[pair[1]]
-            ax1 = axes[pair[0]]
-            ax2 = axes[pair[1]]
-            keypoints_3d.remove(kp1)
-            keypoints_3d.remove(kp2)
-            axes.remove(ax1)
-            axes.remove(ax2)
-            self.current_detections.append(Object(self.object_classes[pair[-1]], kp1, ax1, kp2, ax2))
+        try:
+            for i in range(len(final_pafs_pair)):
+                pair = final_pafs_pair[i][0] #final_pafs_pair is list of lists
+                kp1 = keypoints_3d[pair[0]]
+                kp2 = keypoints_3d[pair[1]]
+                ax1 = axes[pair[0]]
+                ax2 = axes[pair[1]]
+                keypoints_3d.remove(kp1)
+                keypoints_3d.remove(kp2)
+                axes.remove(ax1)
+                axes.remove(ax2)
+                self.current_detections.append(Object(self.object_classes[pair[-1]], kp1, ax1, kp2, ax2))
+        except IndexError:
+            pass
 
         for ax,kp in zip(axes,keypoints_3d):
             # Set remaining kps to "other_container" as a catch all
             self.current_detections.append(Object("other_container", kp, ax, None, None))
             
+    def proposal_to_grasp(self, proposals, final_pafs_pair, cam_pose):
+        # TODO: Get camera pose from TF
+        grasp_pose = {obj: [] for obj in self.current_detections}
+        error_dict = {obj: [] for obj in self.current_detections}
+        for (p,f) in zip(proposals, final_pafs_pair):
+            keypoints = p['keypoints_3d'].numpy()
+            keypoints = cam_pose[:3,:3].dot(keypoints.transpose()) + cam_pose[:3,3,None]*1e2
+            keypoints = keypoints.transpose()
+            axis = p['axis'].numpy()
+            axis = cam_pose[:3,:3].dot(axis.transpose()).transpose()
+            labels = p['labels'].numpy()
+            distance_errors = p['distance_errors']
+            angle_errors = p['angle_errors']
+            for i in range(len(self.current_detections)):
+                k = list(keypoints[i])
+                a = list(axis[i])
+                label = [labels[i]]
+                grasp_pose[self.current_detections[i]].append(k+a+label+[i])
+                error_dict[self.current_detections[i]].append([distance_errors[i]] + [angle_errors[i]] + label)
+            for obj in grasp_pose:
+                if len(grasp_pose[obj]) != 0:
+                    pose = np.array(grasp_pose[obj])
+                else:
+                    pose = []
+                if obj.name == 'mug' or obj.name == 'spoon/spatula':
+                    if len(grasp_pose[obj]) >= 2:
+                        find = False
+                        p1 = set(pose[:, -1])
+                        for pair in f:
+                            p2 = set(pair[:2])
+                            if p1 == p2:
+                                find = True
+                                break
+                        if not find:
+                            pose = []
+                    else:
+                        pose = []
+                if pose == []:
+                    grasp_pose[obj] = pose
+                else:
+                    grasp_pose[obj] = pose[:, :-1]
+        return grasp_pose, error_dict
 
         
 
 
         
-    def visualize(self, rgb_img, proposals, targets, classes, cam_int_mat, final_paf_pairs=None):
+    def visualize(self, rgb_img, proposals, targets, final_paf_pairs=None):
         orig = np.array(rgb_img).transpose((2,0,1))
-        classes_inverse = {classes[key]: key for key in classes}
+        
         imgs = []
         for i, (p,t) in enumerate(zip(proposals, targets)):
             num_prop = p['scores'].size(0)
@@ -177,7 +250,7 @@ class ACF_Detector():
             boxes = p['boxes'].chunk(num_prop)
             labels = p['labels'].chunk(num_prop)
             keypoints_3d = p['keypoints_3d']
-            fx, fy, cx, cy = cam_int_mat[0, 0], cam_int_mat[1, 1], cam_int_mat[0, 2], cam_int_mat[1, 2]
+            fx, fy, cx, cy = self.camera_matrix[0, 0], self.camera_matrix[1, 1], self.camera_matrix[0, 2], self.camera_matrix[1, 2]
             if keypoints_3d is not None:
                 keypoints_x = keypoints_3d[:, 0] / keypoints_3d[:, 2] * fx + cx
                 keypoints_y = keypoints_3d[:, 1] / keypoints_3d[:, 2] * fy + cy
@@ -207,7 +280,7 @@ class ACF_Detector():
                 if l == 2:
                     text_xy[0] = max((x1 + x2) / 2 - 25, 0)
                 text_xy[1] = max(y1 - 18, 0)
-                cv2.putText(rgb_img, classes_inverse[l], (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0))
+                cv2.putText(rgb_img, self.classes_inverse[l], (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0))
                 if keypoints_3d is not None:
                     rgb_img = cv2.circle(rgb_img, tuple(k), 4, color=(0, 0, 255), thickness=-1)
                 if axis is not None:
@@ -223,17 +296,15 @@ class ACF_Detector():
                 if axis is not None and t is not None:
                     for takp in target_axis_kp:
                         takp = takp.cpu().numpy()
-                        # draw.line([takp[0, 0], takp[0, 1], takp[1, 0], takp[1, 1]], fill='green', width=3)
                         start_point = (takp[0, 0], takp[0, 1])
                         end_point = (takp[1, 0], takp[1, 1])
                         rgb_img = cv2.arrowedLine(rgb_img, start_point, end_point, (0, 255, 0), 3, tipLength=0.2)
-                    # rgb_img = Image.fromarray(cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB))
-        # out = os.path.join(OUT_DIR, "{}.png".format(self.i))
-        # print(out)
-        if not cv2.imwrite("/home/cuhsailus/Desktop/on_bot/{}.png".format(self.i), rgb_img):
-            raise Exception("Could not write to loc")
+
+        self.image_pub.publish(self.bridge.cv2_to_imgmsg(rgb_img))
+        # if not cv2.imwrite("/home/cuhsailus/Desktop/on_bot/{}.png".format(self.i), rgb_img):
+        #     raise Exception("Could not write to loc")
         print("Done visualizing")
-        print("###############################\n\n")
+        print("###############################\n")
 
 
 
@@ -257,74 +328,9 @@ class ACF_Detector():
         return normal
 
 
-
-
-
-
-def test_net(args):
-    if args.workers > 1:
-        mp.set_start_method('spawn')
-
-    model = aff_cf_model.ACFNetwork(arch='resnet50', pretrained=True, num_classes=5,
-                                    input_mode=args.input_mode, acf_head=args.acf_head, input_channel=6)
-    device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
-    if args.checkpoint_path != '':
-        state_dict = torch.load(args.checkpoint_path, map_location = device)
-        model.load_state_dict(state_dict['model_state_dict'])
-
-    model.to(device)
-    model.eval()
-    out_imgdir = args.out_dir + '/result_images/'
-    out_evldir = args.out_dir + '/result_eval/'
-    os.system('mkdir -p ' + out_imgdir)
-    os.system('mkdir -p ' + out_evldir)
-    os.system('rm '+out_imgdir+'*')
-
-    # folder_name = '/home/cxt/Documents/research/affordance/fetch_experiment/real_obj_data/data/test_old_set/data/rgb/'
-    for image_path in glob.glob(args.data_dir + '/*rgb.png'):
-        image_rgb = np.array(cv2.cvtColor(cv2.imread(image_path, 1), cv2.COLOR_BGR2RGB)).astype(np.float32) / 255
-        # image_rgb = np.array(Image.open(image_path).convert("RGB")).astype(np.float32) / 255
-        image_depth_ori = cv2.imread(image_path.replace('rgb', 'depth'), -1)
-        image_depth = TF.to_tensor(image_depth_ori.astype(np.float32) / 10).to(device)
-        image_depth_tensor = TF.to_tensor(depth2normal(image_depth_ori)).type(torch.float32)
-        image_rgb_tensor = TF.to_tensor(image_rgb)
-        # image_depth_tensor = TF.to_tensor(image_depth).type(torch.float32)
-        img = torch.cat((image_rgb_tensor, image_depth_tensor), dim=0)
-        img = img.unsqueeze(0)
-
-        img = img.to(device)
-
-        with torch.no_grad():
-            detections, _ = model(img)
-        # camera_matrix = np.array([ [904.572, 0., 635.981],
-        #                             [0., 905.295, 353.060],
-        #                             [0., 0., 1.]])
-        camera_matrix = np.array([[536.544, 0., 324.149],
-                                    [0., 537.666, 224.299],
-                                    [0., 0., 1.]])
-        proposals = utils.post_process_proposals(detections, image_depth, K=config.BOX_POSTPROCESS_NUMBER, camera_mat = camera_matrix)
-        final_pafs_pair = None
-        # try:
-        #     final_pafs_pair = utils.pafprocess(proposals, camera_matrix)
-        # except:
-        #     print('paf error')
-
-        classes = {"__background__": 0,
-                   "body": 1,
-                   "handle": 2,
-                   "stir": 3,
-                   "head": 4}
-        utils.vis_images(proposals, [None], [image_path], classes, camera_matrix, training=False,
-                            output_dir=out_imgdir, final_pafs_pair=final_pafs_pair, save_image_name = image_path.split('/')[-1])
-
-        print('testing output to: ' + out_imgdir)
-
-
 if __name__ == '__main__':
-    rospy.init_node('ACF_Detector')
-    r = rospy.Rate(1)
+    rospy.init_node('ACF_Network')
     foo = ACF_Detector()
+    r = rospy.Rate(10)
     while not rospy.is_shutdown():
         r.sleep()
-    # args = utils.parse_args('test')
-    # test_net(args)

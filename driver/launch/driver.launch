@@ -1,0 +1,3 @@
+<launch>
+    <node pkg="driver" type="main.py" name="driver_node"/>
+</launch>

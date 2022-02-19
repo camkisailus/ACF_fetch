@@ -1,0 +1,3 @@
+<launch>
+    <node pkg="acf_network" type="acf_network_node.py" name="acf_network_node"/>
+</launch>

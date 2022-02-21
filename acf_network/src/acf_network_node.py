@@ -23,6 +23,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
 from cv_bridge import CvBridge
 from acf_network.msg import SceneObject, SceneObjectArray
+from geometry_msgs.msg import PoseStamped
 
 
 RGB_IMAGE_TOPIC = "/head_camera/rgb/image_raw"
@@ -87,17 +88,15 @@ class ACF_Detector():
         self.image_pub = rospy.Publisher("/ACF_Network/detections/Image", Image, queue_size=10)
         self.scene_obj_pub = rospy.Publisher("/ACF_Network/detections/scene_objects", SceneObjectArray, queue_size=10)
         self.detect_sub = rospy.Subscriber("/ACF_Network/run_network", Bool, self.detection_callback)
-        self.tf_listener = tf.TransfromListener()
+        self.tf_listener = tf.TransformListener()
 
     def img_callback(self, rgb_msg, depth_msg):
-        rospy.logwarn("Got images")
         with self._lock:
             self._rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg)
             self._rgb_img = cv2.cvtColor(self._rgb_img, cv2.COLOR_BGR2RGB)
             self._depth_img = self.bridge.imgmsg_to_cv2(depth_msg)
-            # t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_link')
-            # self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_link', t)
-            # print(self._cam_pose)
+            t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_link')
+            self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_link', rospy.Time(0))
     
         
 
@@ -107,7 +106,6 @@ class ACF_Detector():
         if self._rgb_img is None or self._depth_img is None:
             rospy.logwarn("ACF Detector hasn't gotten RGB and/or Depth imgs yet...RETURNING")
             return
-        # print("Running network")
         with self._lock:
             self.current_detections.clear()
             image_rgb = np.array(self._rgb_img).astype(np.float32) / 255
@@ -121,16 +119,16 @@ class ACF_Detector():
 
             with torch.no_grad():
                 detections, _ = self.model(img)
-            print("GOT DETECTIONS")
+
 
             proposals = utils.post_process_proposals(detections, image_depth, img_shape=(480,640), K=config.BOX_POSTPROCESS_NUMBER, camera_mat = self.camera_matrix)
-            print("GOT PROPOSALS")
+
             try:
                 final_pafs_pair = utils.pafprocess(proposals, self.camera_matrix)
             except:
                 rospy.logwarn("paf ERROR")
                 final_pafs_pair = None
-            print("GOT PAF PAIRS")
+
             self.visualize(self._rgb_img.copy(), proposals, [None], final_pafs_pair)
         self.group_objects(proposals, final_pafs_pair)
         self.publish_detections()
@@ -139,28 +137,61 @@ class ACF_Detector():
         self.scene_obj_msgs = []
         for obj in self.current_detections:
             msg = SceneObject()
-            msg.name = obj.id
-            msg.kp1.position.x = obj.kp1[0]
-            msg.kp1.position.y = obj.kp1[1]
-            msg.kp1.position.z = obj.kp1[2]
+            # trans_camera_link = np.array([obj.kp1[0], obj.kp1[1], obj.kp1[2]]).reshape((3,1))
+            # rot_camera_link = Rotation.from_euler('xyz', obj.ax1, degrees=False).as_matrix()
+            # homogeneous_mat = np.hstack((rot_camera_link, trans_camera_link))
+            # homogeneous_mat = np.vstack((homogeneous_mat, np.array([0,0,0,1]).reshape((1,4))))
+
+            # kp_loc_base_link = np.dot(self._cam_pose, homogeneous_mat)
+            # msg.kp1.position.x = kp_loc_base_link[0,3]
+            # msg.kp1.position.y = kp_loc_base_link[1,3]
+            # msg.kp1.position.z = kp_loc_base_link[2,3]
+            # rot = Rotation.from_matrix(homogeneous_mat[0:3, 0:3])
+            # q1 = rot.as_quat()
+            # msg.kp1.orientation.x = q1[0]
+            # msg.kp1.orientation.y = q1[1]
+            # msg.kp1.orientation.z = q1[2]
+            # msg.kp1.orientation.w = q1[3]
+
+
+            pose_camera_link = PoseStamped()
+            pose_camera_link.header.frame_id = '/head_camera_link'
+            pose_camera_link.header.stamp = rospy.Time.now()
+            pose_camera_link.pose.position.x = obj.kp1[0]
+            pose_camera_link.pose.position.y = obj.kp1[1]
+            pose_camera_link.pose.position.z = obj.kp1[2]
             rot1 = Rotation.from_euler('xyz', obj.ax1, degrees=False)
             q1 = rot1.as_quat()
-            msg.kp1.orientation.x = q1[0]
-            msg.kp1.orientation.y = q1[1]
-            msg.kp1.orientation.z = q1[2]
-            msg.kp1.orientation.w = q1[3]
-            if obj.kp2 is not None:
-                msg.kp2.position.x = obj.kp2[0]
-                msg.kp2.position.y = obj.kp2[1]
-                msg.kp2.position.z = obj.kp2[2]
-                rot2 = Rotation.from_euler('xyz', obj.ax2, degrees=False)
-                q2 = rot2.as_quat()
-                msg.kp1.orientation.x = q2[0]
-                msg.kp1.orientation.y = q2[1]
-                msg.kp1.orientation.z = q2[2]
-                msg.kp1.orientation.w = q2[3]
+            pose_camera_link.pose.orientation.x = q1[0]
+            pose_camera_link.pose.orientation.y = q1[1]
+            pose_camera_link.pose.orientation.z = q1[2]
+            pose_camera_link.pose.orientation.w = q1[3]
+            self.tf_listener.waitForTransform('/base_link', '/head_camera_link', pose_camera_link.header.stamp, rospy.Duration(5))
+            if self.tf_listener.canTransform('/base_link', '/head_camera_link', pose_camera_link.header.stamp):
+                rospy.logwarn("Able to do transform!")
+                pose_base_link = self.tf_listener.transformPose('/base_link', pose_camera_link)
+                rospy.logwarn(pose_base_link)
             else:
-                obj.kp2 = None
+                rospy.logfatal("Could not transfrom kp pose from head_camera_link to base_link")
+            msg.name = obj.name
+            msg.kp1 = pose_base_link
+            # if obj.kp2 is not None:
+            #     pose_camera_link = PoseStamped()
+            #     pose_camera_link.header.frame_id = '/head_camera_link'
+            #     pose_camera_link.header.stamp = rospy.Time.now()
+            #     pose_camera_link.pose.position.x = obj.kp2[0]
+            #     pose_camera_link.pose.position.y = obj.kp2[1]
+            #     pose_camera_link.pose.position.z = obj.kp2[2]
+            #     rot1 = Rotation.from_euler('xyz', obj.ax2, degrees=False)
+            #     q1 = rot1.as_quat()
+            #     pose_camera_link.pose.orientation.x = q1[0]
+            #     pose_camera_link.pose.orientation.y = q1[1]
+            #     pose_camera_link.pose.orientation.z = q1[2]
+            #     pose_camera_link.pose.orientation.w = q1[3]
+            #     pose_base_link = self.tf_listener.transformPose('/base_link', pose_camera_link)
+            #     msg.kp2 = pose_base_link
+            # else:
+            msg.kp2 = pose_base_link
             self.scene_obj_msgs.append(msg)
         arr_msg = SceneObjectArray()
         arr_msg.scene_objects = self.scene_obj_msgs

@@ -88,18 +88,22 @@ class ACF_Detector():
         self.i = 0
         self.image_pub = rospy.Publisher("/ACF_Network/detections/Image", Image, queue_size=10)
         self.scene_obj_pub = rospy.Publisher("/ACF_Network/detections/scene_objects", SceneObjectArray, queue_size=10)
+        self.ready_pub = rospy.Publisher("/ACF_Network/ready_for_detections", Bool, queue_size=10)
+        self.notified_user = False
         self.detect_sub = rospy.Subscriber("/ACF_Network/run_network", Bool, self.detection_callback)
         self.tf_listener = tf.TransformListener()
 
     def img_callback(self, rgb_msg, depth_msg):
-        rospy.logwarn("Got images")
+        # rospy.logwarn("Got images")
         with self._lock:
             self._rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg)
             self._rgb_img = cv2.cvtColor(self._rgb_img, cv2.COLOR_BGR2RGB)
             self._depth_img = self.bridge.imgmsg_to_cv2(depth_msg)
-            # t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_rgb_optical_frame')
-            # self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_rgb_optical_frame', rospy.Time(0))
-    
+            t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_rgb_optical_frame')
+            self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_rgb_optical_frame', rospy.Time(0))
+            if not self.notified_user:
+                self.ready_pub.publish(True)
+                self.notified_user = True
         
 
     def detection_callback(self, msg):
@@ -132,12 +136,26 @@ class ACF_Detector():
                 final_pafs_pair = None
             self.group_objects(proposals, final_pafs_pair)
 
-            self.visualize(self._rgb_img.copy(), proposals, [None], final_pafs_pair)
+            self.visualize(self._rgb_img.copy())
         
         self.publish_detections()
         
     def publish_detections(self):
         self.scene_obj_msgs = []
+
+        # Invalid pose msg since ros doesn't allow optional message fields
+        # Used for objects with only 1 keypoint (bowl & other_container)
+        none_pose_msg = PoseStamped() 
+        none_pose_msg.header.frame_id = 'None'
+        none_pose_msg.header.stamp = rospy.Time.now()
+        none_pose_msg.pose.position.x = 0
+        none_pose_msg.pose.position.y = 0
+        none_pose_msg.pose.position.z = 0
+        none_pose_msg.pose.orientation.x = 0 
+        none_pose_msg.pose.orientation.y = 0
+        none_pose_msg.pose.orientation.z = 0
+        none_pose_msg.pose.orientation.w = 1
+
         for obj in self.current_detections:
             kp1_pose_camera_link = PoseStamped()
             kp1_pose_camera_link.header.frame_id = '/head_camera_rgb_optical_frame'
@@ -163,18 +181,24 @@ class ACF_Detector():
                 kp2_pose_camera_link.pose.orientation.y = q1[1]
                 kp2_pose_camera_link.pose.orientation.z = q1[2]
                 kp2_pose_camera_link.pose.orientation.w = q1[3]
+            else:
+                kp2_pose_camera_link = None
             
             self.tf_listener.waitForTransform('/base_link', '/head_camera_rgb_optical_frame', kp1_pose_camera_link.header.stamp, rospy.Duration(5))
             if self.tf_listener.canTransform('/base_link', '/head_camera_rgb_optical_frame', kp1_pose_camera_link.header.stamp):
                 kp1_pose_base_link = self.tf_listener.transformPose('/base_link', kp1_pose_camera_link)
-                kp2_pose_base_link = self.tf_listener.transformPose('/base_link', kp2_pose_camera_link) 
+                if kp2_pose_camera_link is not None:
+                    kp2_pose_base_link = self.tf_listener.transformPose('/base_link', kp2_pose_camera_link) 
             else:
                 rospy.logfatal("Could not transfrom kp pose from head_camera_link to base_link")
 
             msg = SceneObject()
             msg.name = obj.name
             msg.kp1 = kp1_pose_base_link
-            msg.kp2 = kp2_pose_base_link if kp2_pose_base_link else None
+            if kp2_pose_camera_link is not None:
+                msg.kp2 = kp2_pose_base_link 
+            else:
+                msg.kp2 = none_pose_msg
             self.scene_obj_msgs.append(msg)
         arr_msg = SceneObjectArray()
         arr_msg.scene_objects = self.scene_obj_msgs
@@ -182,24 +206,20 @@ class ACF_Detector():
 
         
     def group_objects(self, proposals, final_pafs_pair):
-        print("Grouping objects")
+        # print("Grouping objects")
         axes = proposals[0]['axis'].tolist()
         keypoints_3d = proposals[0]['keypoints_3d'].tolist()
         bboxes = proposals[0]['boxes'].tolist()
         try:
             for i in range(len(final_pafs_pair)):
                 pair = final_pafs_pair[i][0] #final_pafs_pair is list of lists
-                rospy.logwarn("pair = {}".format(pair))
                 kp1 = keypoints_3d[pair[0]]
                 kp2 = keypoints_3d[pair[1]]
                 ax1 = axes[pair[0]]
                 ax2 = axes[pair[1]]
                 bbox1 = bboxes[pair[0]]
                 bbox2 = bboxes[pair[1]]
-                rospy.logwarn("bbox1 is {}".format(bbox1))
-                rospy.logwarn("bbox2 is {}".format(bbox2))
                 bbox = (min(bbox1[0], bbox2[0]), min(bbox1[1], bbox2[1]), max(bbox1[2], bbox2[2]), max(bbox1[3], bbox2[3]))
-                rospy.logwarn("bbox is {}".format(bbox))
                 keypoints_3d.remove(kp1)
                 keypoints_3d.remove(kp2)
                 axes.remove(ax1)
@@ -263,13 +283,13 @@ class ACF_Detector():
 
 
         
-    def visualize(self, rgb_img, proposals, targets, final_paf_pairs=None):
+    def visualize(self, rgb_img):
         axis_length = 10
         fx, fy, cx, cy = self.camera_matrix[0, 0], self.camera_matrix[1, 1], self.camera_matrix[0, 2], self.camera_matrix[1, 2]
             
 
         for obj in self.current_detections:
-            kp1 = obj.kp1   
+            kp1 = obj.kp1
             kpx = kp1[0] / kp1[2] * fx + cx
             kpy = kp1[1] / kp1[2] * fy + cy        
             rgb_img = cv2.circle(rgb_img, (int(kpx), int(kpy)), 4, color=(0, 0, 255), thickness=-1)
@@ -286,8 +306,7 @@ class ACF_Detector():
                 kpy = kp2[1] / kp2[2] * fy + cy
                 rgb_img = cv2.circle(rgb_img, (int(kpx), int(kpy)), 4, color=(0, 0, 255), thickness=-1)
                 ax2 = obj.ax2
-                axis = [obj.ax1, obj.ax2]
-                another_keypoint = kp2 + axis_length * ax2
+                another_keypoint = [kp2[i] + axis_length * ax2[i] for i in range(3)]
                 project_2d_x = another_keypoint[0] / another_keypoint[2] * fx + cx
                 project_2d_y = another_keypoint[1] / another_keypoint[2] * fy + cy
                 end_point = (int(project_2d_x), int(project_2d_y))
@@ -297,15 +316,12 @@ class ACF_Detector():
             x1, y1, x2, y2 = bbox
             start_pt = tuple((int(x1), int(y1)))
             end_pt = tuple((int(x2), int(y2)))
-            rospy.logwarn("start_pt: {}".format(start_pt))
-            rospy.logwarn("end_pt: {}".format(end_pt))
             rgb_img = cv2.rectangle(rgb_img, start_pt, end_pt , (255,255,255), thickness=2)
             text_xy = [0, 0]
             text_xy[0] = int(max((x1 + x2) / 2 - 18, 0))
             text_xy[1] = int(max(y1 - 18, 0))
-            rgb_img = cv2.putText(rgb_img, obj.name, (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0))
-            
-        
+            rgb_img = cv2.putText(rgb_img, obj.name, (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0)) 
+    
         # imgs = []
         # for i, (p,t) in enumerate(zip(proposals, targets)):
         #     num_prop = p['scores'].size(0)

@@ -1,3 +1,3 @@
 string name
-geometry_msgs/Pose kp1
-geometry_msgs/Pose kp2
+geometry_msgs/PoseStamped kp1
+geometry_msgs/PoseStamped kp2

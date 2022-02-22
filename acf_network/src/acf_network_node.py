@@ -1,5 +1,6 @@
 #!/home/cuhsailus/anaconda3/envs/acf/bin/python
 import os
+from matplotlib.colors import PowerNorm
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -23,7 +24,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
 from cv_bridge import CvBridge
 from acf_network.msg import SceneObject, SceneObjectArray
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PointStamped
 
 
 RGB_IMAGE_TOPIC = "/head_camera/rgb/image_raw"
@@ -35,13 +36,14 @@ OUT_DIR = "/home/cuhsailus/Desktop/affordance_coordinate_frame/out/"
 MASK_ALPHA = 0.6
 
 class Object():
-    def __init__(self, obj_name, kp1, ax1, kp2=None, ax2=None):
+    def __init__(self, obj_name, kp1, ax1, bbox, kp2=None, ax2=None):
         self.id = uuid.uuid4() #unique identifier
         self.name = obj_name
         self.kp1 = kp1
         self.ax1 = ax1
         self.kp2 = kp2
         self.ax2 = ax2
+        self.bbox = bbox
     
     def __hash__(self):
         return hash(self.id)
@@ -71,7 +73,6 @@ class ACF_Detector():
                             [0., 537.666, 224.299],
                             [0., 0., 1.]])
         self.object_classes = {0: "mug", 1:"bottle", 2:"spoon/spatula", 3:"other_container"}
-        self.acf_labels = {1:"container", 2:"handle", 3:"stir", 4:"scoop"}
         self.current_detections = []
         self._rgb_img = None
         self._depth_img = None
@@ -91,12 +92,13 @@ class ACF_Detector():
         self.tf_listener = tf.TransformListener()
 
     def img_callback(self, rgb_msg, depth_msg):
+        rospy.logwarn("Got images")
         with self._lock:
             self._rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg)
             self._rgb_img = cv2.cvtColor(self._rgb_img, cv2.COLOR_BGR2RGB)
             self._depth_img = self.bridge.imgmsg_to_cv2(depth_msg)
-            t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_link')
-            self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_link', rospy.Time(0))
+            # t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_rgb_optical_frame')
+            # self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_rgb_optical_frame', rospy.Time(0))
     
         
 
@@ -128,70 +130,51 @@ class ACF_Detector():
             except:
                 rospy.logwarn("paf ERROR")
                 final_pafs_pair = None
+            self.group_objects(proposals, final_pafs_pair)
 
             self.visualize(self._rgb_img.copy(), proposals, [None], final_pafs_pair)
-        self.group_objects(proposals, final_pafs_pair)
+        
         self.publish_detections()
         
     def publish_detections(self):
         self.scene_obj_msgs = []
         for obj in self.current_detections:
-            msg = SceneObject()
-            # trans_camera_link = np.array([obj.kp1[0], obj.kp1[1], obj.kp1[2]]).reshape((3,1))
-            # rot_camera_link = Rotation.from_euler('xyz', obj.ax1, degrees=False).as_matrix()
-            # homogeneous_mat = np.hstack((rot_camera_link, trans_camera_link))
-            # homogeneous_mat = np.vstack((homogeneous_mat, np.array([0,0,0,1]).reshape((1,4))))
-
-            # kp_loc_base_link = np.dot(self._cam_pose, homogeneous_mat)
-            # msg.kp1.position.x = kp_loc_base_link[0,3]
-            # msg.kp1.position.y = kp_loc_base_link[1,3]
-            # msg.kp1.position.z = kp_loc_base_link[2,3]
-            # rot = Rotation.from_matrix(homogeneous_mat[0:3, 0:3])
-            # q1 = rot.as_quat()
-            # msg.kp1.orientation.x = q1[0]
-            # msg.kp1.orientation.y = q1[1]
-            # msg.kp1.orientation.z = q1[2]
-            # msg.kp1.orientation.w = q1[3]
-
-
-            pose_camera_link = PoseStamped()
-            pose_camera_link.header.frame_id = '/head_camera_link'
-            pose_camera_link.header.stamp = rospy.Time.now()
-            pose_camera_link.pose.position.x = obj.kp1[0]
-            pose_camera_link.pose.position.y = obj.kp1[1]
-            pose_camera_link.pose.position.z = obj.kp1[2]
+            kp1_pose_camera_link = PoseStamped()
+            kp1_pose_camera_link.header.frame_id = '/head_camera_rgb_optical_frame'
+            kp1_pose_camera_link.header.stamp = rospy.Time.now()
+            kp1_pose_camera_link.pose.position.x = obj.kp1[0] / 100.0 # m -> cm conversion
+            kp1_pose_camera_link.pose.position.y = obj.kp1[1] / 100.0
+            kp1_pose_camera_link.pose.position.z = obj.kp1[2] / 100.0
             rot1 = Rotation.from_euler('xyz', obj.ax1, degrees=False)
             q1 = rot1.as_quat()
-            pose_camera_link.pose.orientation.x = q1[0]
-            pose_camera_link.pose.orientation.y = q1[1]
-            pose_camera_link.pose.orientation.z = q1[2]
-            pose_camera_link.pose.orientation.w = q1[3]
-            self.tf_listener.waitForTransform('/base_link', '/head_camera_link', pose_camera_link.header.stamp, rospy.Duration(5))
-            if self.tf_listener.canTransform('/base_link', '/head_camera_link', pose_camera_link.header.stamp):
-                rospy.logwarn("Able to do transform!")
-                pose_base_link = self.tf_listener.transformPose('/base_link', pose_camera_link)
-                rospy.logwarn(pose_base_link)
+            kp1_pose_camera_link.pose.orientation.x = q1[0]
+            kp1_pose_camera_link.pose.orientation.y = q1[1]
+            kp1_pose_camera_link.pose.orientation.z = q1[2]
+            kp1_pose_camera_link.pose.orientation.w = q1[3]
+            if obj.kp2 is not None:
+                kp2_pose_camera_link = PoseStamped()
+                kp2_pose_camera_link.header.frame_id = '/head_camera_rgb_optical_frame'
+                kp2_pose_camera_link.pose.position.x = obj.kp2[0] / 100
+                kp2_pose_camera_link.pose.position.y = obj.kp2[1] / 100 
+                kp2_pose_camera_link.pose.position.z = obj.kp2[2] / 100 
+                rot1 = Rotation.from_euler('xyz', obj.ax2, degrees=False)
+                q1 = rot1.as_quat()
+                kp2_pose_camera_link.pose.orientation.x = q1[0]
+                kp2_pose_camera_link.pose.orientation.y = q1[1]
+                kp2_pose_camera_link.pose.orientation.z = q1[2]
+                kp2_pose_camera_link.pose.orientation.w = q1[3]
+            
+            self.tf_listener.waitForTransform('/base_link', '/head_camera_rgb_optical_frame', kp1_pose_camera_link.header.stamp, rospy.Duration(5))
+            if self.tf_listener.canTransform('/base_link', '/head_camera_rgb_optical_frame', kp1_pose_camera_link.header.stamp):
+                kp1_pose_base_link = self.tf_listener.transformPose('/base_link', kp1_pose_camera_link)
+                kp2_pose_base_link = self.tf_listener.transformPose('/base_link', kp2_pose_camera_link) 
             else:
                 rospy.logfatal("Could not transfrom kp pose from head_camera_link to base_link")
+
+            msg = SceneObject()
             msg.name = obj.name
-            msg.kp1 = pose_base_link
-            # if obj.kp2 is not None:
-            #     pose_camera_link = PoseStamped()
-            #     pose_camera_link.header.frame_id = '/head_camera_link'
-            #     pose_camera_link.header.stamp = rospy.Time.now()
-            #     pose_camera_link.pose.position.x = obj.kp2[0]
-            #     pose_camera_link.pose.position.y = obj.kp2[1]
-            #     pose_camera_link.pose.position.z = obj.kp2[2]
-            #     rot1 = Rotation.from_euler('xyz', obj.ax2, degrees=False)
-            #     q1 = rot1.as_quat()
-            #     pose_camera_link.pose.orientation.x = q1[0]
-            #     pose_camera_link.pose.orientation.y = q1[1]
-            #     pose_camera_link.pose.orientation.z = q1[2]
-            #     pose_camera_link.pose.orientation.w = q1[3]
-            #     pose_base_link = self.tf_listener.transformPose('/base_link', pose_camera_link)
-            #     msg.kp2 = pose_base_link
-            # else:
-            msg.kp2 = pose_base_link
+            msg.kp1 = kp1_pose_base_link
+            msg.kp2 = kp2_pose_base_link if kp2_pose_base_link else None
             self.scene_obj_msgs.append(msg)
         arr_msg = SceneObjectArray()
         arr_msg.scene_objects = self.scene_obj_msgs
@@ -202,24 +185,36 @@ class ACF_Detector():
         print("Grouping objects")
         axes = proposals[0]['axis'].tolist()
         keypoints_3d = proposals[0]['keypoints_3d'].tolist()
+        bboxes = proposals[0]['boxes'].tolist()
         try:
             for i in range(len(final_pafs_pair)):
                 pair = final_pafs_pair[i][0] #final_pafs_pair is list of lists
+                rospy.logwarn("pair = {}".format(pair))
                 kp1 = keypoints_3d[pair[0]]
                 kp2 = keypoints_3d[pair[1]]
                 ax1 = axes[pair[0]]
                 ax2 = axes[pair[1]]
+                bbox1 = bboxes[pair[0]]
+                bbox2 = bboxes[pair[1]]
+                rospy.logwarn("bbox1 is {}".format(bbox1))
+                rospy.logwarn("bbox2 is {}".format(bbox2))
+                bbox = (min(bbox1[0], bbox2[0]), min(bbox1[1], bbox2[1]), max(bbox1[2], bbox2[2]), max(bbox1[3], bbox2[3]))
+                rospy.logwarn("bbox is {}".format(bbox))
                 keypoints_3d.remove(kp1)
                 keypoints_3d.remove(kp2)
                 axes.remove(ax1)
                 axes.remove(ax2)
-                self.current_detections.append(Object(self.object_classes[pair[-1]], kp1, ax1, kp2, ax2))
+                bboxes.remove(bbox1)
+                bboxes.remove(bbox2)
+                self.current_detections.append(Object(self.object_classes[pair[-1]]+str(len(self.current_detections)), kp1, ax1, bbox, kp2, ax2))
         except IndexError:
             pass
-
-        for ax,kp in zip(axes,keypoints_3d):
+        i = 0
+        for ax, kp in zip(axes,keypoints_3d):
             # Set remaining kps to "other_container" as a catch all
-            self.current_detections.append(Object("other_container", kp, ax, None, None))
+            bbox = bboxes[i]
+            self.current_detections.append(Object("OC_"+str(i), kp, ax, bbox, None, None))
+            i+=1
             
     def proposal_to_grasp(self, proposals, final_pafs_pair, cam_pose):
         # TODO: Get camera pose from TF
@@ -269,73 +264,116 @@ class ACF_Detector():
 
         
     def visualize(self, rgb_img, proposals, targets, final_paf_pairs=None):
-        orig = np.array(rgb_img).transpose((2,0,1))
-        
-        imgs = []
-        for i, (p,t) in enumerate(zip(proposals, targets)):
-            num_prop = p['scores'].size(0)
-            if num_prop < 1:
-                imgs.append((orig, 0, orig))
-            scores = p['scores'].chunk(num_prop)
-            masks = p['masks'].chunk(num_prop)
-            boxes = p['boxes'].chunk(num_prop)
-            labels = p['labels'].chunk(num_prop)
-            keypoints_3d = p['keypoints_3d']
-            fx, fy, cx, cy = self.camera_matrix[0, 0], self.camera_matrix[1, 1], self.camera_matrix[0, 2], self.camera_matrix[1, 2]
-            if keypoints_3d is not None:
-                keypoints_x = keypoints_3d[:, 0] / keypoints_3d[:, 2] * fx + cx
-                keypoints_y = keypoints_3d[:, 1] / keypoints_3d[:, 2] * fy + cy
-                keypoints = torch.stack((keypoints_x, keypoints_y), dim=1).cpu()
+        axis_length = 10
+        fx, fy, cx, cy = self.camera_matrix[0, 0], self.camera_matrix[1, 1], self.camera_matrix[0, 2], self.camera_matrix[1, 2]
+            
 
-            axis = p['axis']
-            if axis is not None:
-                if t is not None:
-                    target_axis_keypoints = t['axis_keypoints']
-                    t_keypoints_x = target_axis_keypoints[..., 0] / target_axis_keypoints[..., 2] * fx + cx
-                    t_keypoints_y = target_axis_keypoints[..., 1] / target_axis_keypoints[..., 2] * fy + cy
-                    target_axis_kp = torch.stack((t_keypoints_x, t_keypoints_y), dim=2)
-            for i in range(len(scores)):
-                s, m, b, l = scores[i], masks[i], boxes[i], labels[i]
-                s, m, b, l = s.squeeze(0).cpu().numpy(), m.squeeze().cpu().numpy(), b.squeeze(0).cpu().numpy(), \
-                            l.cpu().numpy()[0]
-                if keypoints_3d is not None:
-                    k = keypoints[i].squeeze().cpu().numpy()
-                
-                #put bboxes on image
-                x1, y1, x2, y2 = b
-                start_pt = (x1, y1)
-                end_pt = (x2,y2)
-                cv2.rectangle(rgb_img,start_pt,end_pt,(255,255,255), thickness=2)
-                text_xy = b[:2]
-                text_xy[0] = max((x1 + x2) / 2 - 18, 0)
-                if l == 2:
-                    text_xy[0] = max((x1 + x2) / 2 - 25, 0)
-                text_xy[1] = max(y1 - 18, 0)
-                cv2.putText(rgb_img, self.classes_inverse[l], (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0))
-                if keypoints_3d is not None:
-                    rgb_img = cv2.circle(rgb_img, tuple(k), 4, color=(0, 0, 255), thickness=-1)
-                if axis is not None:
-                    length = 10
-                    one_axis = axis[i].cpu().numpy()
-                    center_keypoint = keypoints_3d[i].squeeze().cpu().numpy()
-                    another_keypoint = center_keypoint + length * one_axis
-                    project_2d_x = another_keypoint[0] / another_keypoint[2] * fx + cx
-                    project_2d_y = another_keypoint[1] / another_keypoint[2] * fy + cy
-                    end_point = (int(project_2d_x), int(project_2d_y))
-                    rgb_img = cv2.arrowedLine(rgb_img, tuple((k).astype("int")), end_point, color=(0, 165, 255), thickness = 3, tipLength=0.2)
+        for obj in self.current_detections:
+            kp1 = obj.kp1   
+            kpx = kp1[0] / kp1[2] * fx + cx
+            kpy = kp1[1] / kp1[2] * fy + cy        
+            rgb_img = cv2.circle(rgb_img, (int(kpx), int(kpy)), 4, color=(0, 0, 255), thickness=-1)
+            ax1 = obj.ax1
+            another_kp = [kp1[i] + axis_length*ax1[i] for i in range(3)]
+            project_2d_x = another_kp[0] / another_kp[2] * fx + cx
+            project_2d_y = another_kp[1] / another_kp[2] * fy + cy
+            end_point = (int(project_2d_x), int(project_2d_y))
+            rgb_img = cv2.arrowedLine(rgb_img, (int(kpx), int(kpy)), end_point, color=(0, 165, 255), thickness = 3, tipLength=0.2)
+
+            if obj.kp2 is not None:
+                kp2 = obj.kp2
+                kpx = kp2[0] / kp2[2] * fx + cx
+                kpy = kp2[1] / kp2[2] * fy + cy
+                rgb_img = cv2.circle(rgb_img, (int(kpx), int(kpy)), 4, color=(0, 0, 255), thickness=-1)
+                ax2 = obj.ax2
+                axis = [obj.ax1, obj.ax2]
+                another_keypoint = kp2 + axis_length * ax2
+                project_2d_x = another_keypoint[0] / another_keypoint[2] * fx + cx
+                project_2d_y = another_keypoint[1] / another_keypoint[2] * fy + cy
+                end_point = (int(project_2d_x), int(project_2d_y))
+                rgb_img = cv2.arrowedLine(rgb_img, (int(kpx), int(kpy)), end_point, color=(0, 165, 255), thickness = 3, tipLength=0.2)
                             
-                if axis is not None and t is not None:
-                    for takp in target_axis_kp:
-                        takp = takp.cpu().numpy()
-                        start_point = (takp[0, 0], takp[0, 1])
-                        end_point = (takp[1, 0], takp[1, 1])
-                        rgb_img = cv2.arrowedLine(rgb_img, start_point, end_point, (0, 255, 0), 3, tipLength=0.2)
+            bbox = obj.bbox
+            x1, y1, x2, y2 = bbox
+            start_pt = tuple((int(x1), int(y1)))
+            end_pt = tuple((int(x2), int(y2)))
+            rospy.logwarn("start_pt: {}".format(start_pt))
+            rospy.logwarn("end_pt: {}".format(end_pt))
+            rgb_img = cv2.rectangle(rgb_img, start_pt, end_pt , (255,255,255), thickness=2)
+            text_xy = [0, 0]
+            text_xy[0] = int(max((x1 + x2) / 2 - 18, 0))
+            text_xy[1] = int(max(y1 - 18, 0))
+            rgb_img = cv2.putText(rgb_img, obj.name, (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0))
+            
+        
+        # imgs = []
+        # for i, (p,t) in enumerate(zip(proposals, targets)):
+        #     num_prop = p['scores'].size(0)
+        #     if num_prop < 1:
+        #         imgs.append((orig, 0, orig))
+        #     scores = p['scores'].chunk(num_prop)
+        #     masks = p['masks'].chunk(num_prop)
+        #     boxes = p['boxes'].chunk(num_prop)
+        #     labels = p['labels'].chunk(num_prop)
+        #     keypoints_3d = p['keypoints_3d']
+        #     fx, fy, cx, cy = self.camera_matrix[0, 0], self.camera_matrix[1, 1], self.camera_matrix[0, 2], self.camera_matrix[1, 2]
+        #     if keypoints_3d is not None:
+        #         keypoints_x = keypoints_3d[:, 0] / keypoints_3d[:, 2] * fx + cx
+        #         keypoints_y = keypoints_3d[:, 1] / keypoints_3d[:, 2] * fy + cy
+        #         keypoints = torch.stack((keypoints_x, keypoints_y), dim=1).cpu()
+
+        #     axis = p['axis']
+        #     if axis is not None:
+        #         if t is not None:
+        #             target_axis_keypoints = t['axis_keypoints']
+        #             t_keypoints_x = target_axis_keypoints[..., 0] / target_axis_keypoints[..., 2] * fx + cx
+        #             t_keypoints_y = target_axis_keypoints[..., 1] / target_axis_keypoints[..., 2] * fy + cy
+        #             target_axis_kp = torch.stack((t_keypoints_x, t_keypoints_y), dim=2)
+        #     for i in range(len(scores)):
+        #         s, m, b, l = scores[i], masks[i], boxes[i], labels[i]
+        #         s, m, b, l = s.squeeze(0).cpu().numpy(), m.squeeze().cpu().numpy(), b.squeeze(0).cpu().numpy(), \
+        #                     l.cpu().numpy()[0]
+        #         if keypoints_3d is not None:
+        #             k = keypoints[i].squeeze().cpu().numpy()
+                
+        #         #put bboxes on image
+        #         x1, y1, x2, y2 = b
+        #         start_pt = (x1, y1)
+        #         end_pt = (x2,y2)
+        #         cv2.rectangle(rgb_img,start_pt,end_pt,(255,255,255), thickness=2)
+        #         text_xy = b[:2]
+        #         text_xy[0] = max((x1 + x2) / 2 - 18, 0)
+        #         if l == 2:
+        #             text_xy[0] = max((x1 + x2) / 2 - 25, 0)
+        #         text_xy[1] = max(y1 - 18, 0)
+        #         cv2.putText(rgb_img, self.classes_inverse[l], (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0))
+        #         if keypoints_3d is not None:
+        #             rgb_img = cv2.circle(rgb_img, tuple(k), 4, color=(0, 0, 255), thickness=-1)
+        #         if axis is not None:
+        #             length = 10
+        #             one_axis = axis[i].cpu().numpy()
+        #             center_keypoint = keypoints_3d[i].squeeze().cpu().numpy()
+        #             another_keypoint = center_keypoint + length * one_axis
+        #             project_2d_x = another_keypoint[0] / another_keypoint[2] * fx + cx
+        #             project_2d_y = another_keypoint[1] / another_keypoint[2] * fy + cy
+        #             end_point = (int(project_2d_x), int(project_2d_y))
+        #             rospy.logwarn("one_axis is = {}".format(one_axis))
+        #             rospy.logwarn("center_kp is = {}".format(center_keypoint))
+        #             rospy.logwarn("keypoints_3d[i] is {}".format(keypoints_3d[i]))
+        #             rospy.logwarn("another_kp is = {}".format(another_keypoint))
+        #             rgb_img = cv2.arrowedLine(rgb_img, tuple((k).astype("int")), end_point, color=(0, 165, 255), thickness = 3, tipLength=0.2)
+                            
+        #         if axis is not None and t is not None:
+        #             for takp in target_axis_kp:
+        #                 takp = takp.cpu().numpy()
+        #                 start_point = (takp[0, 0], takp[0, 1])
+        #                 end_point = (takp[1, 0], takp[1, 1])
+        #                 rgb_img = cv2.arrowedLine(rgb_img, start_point, end_point, (0, 255, 0), 3, tipLength=0.2)
 
         self.image_pub.publish(self.bridge.cv2_to_imgmsg(rgb_img))
         # if not cv2.imwrite("/home/cuhsailus/Desktop/on_bot/{}.png".format(self.i), rgb_img):
         #     raise Exception("Could not write to loc")
-        print("Done visualizing")
-        print("###############################\n")
+        rospy.logwarn("Done visualizing")
 
 
 

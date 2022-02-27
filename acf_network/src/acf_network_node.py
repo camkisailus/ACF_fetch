@@ -94,16 +94,19 @@ class ACF_Detector():
         self.tf_listener = tf.TransformListener()
 
     def img_callback(self, rgb_msg, depth_msg):
-        # rospy.logwarn("Got images")
+        if not self.notified_user:
+            rospy.logwarn("Got images")
+            self.notified_user = True
         with self._lock:
             self._rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg)
             self._rgb_img = cv2.cvtColor(self._rgb_img, cv2.COLOR_BGR2RGB)
             self._depth_img = self.bridge.imgmsg_to_cv2(depth_msg)
             t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_rgb_optical_frame')
             self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_rgb_optical_frame', rospy.Time(0))
-            if not self.notified_user:
-                self.ready_pub.publish(True)
-                self.notified_user = True
+            # if not self.notified_user:
+            #     self.ready_pub.publish(True)
+            #     rospy.logwarn("Notified user")
+            #     self.notified_user = True
         
 
     def detection_callback(self, msg):
@@ -311,7 +314,7 @@ class ACF_Detector():
                 project_2d_y = another_keypoint[1] / another_keypoint[2] * fy + cy
                 end_point = (int(project_2d_x), int(project_2d_y))
                 rgb_img = cv2.arrowedLine(rgb_img, (int(kpx), int(kpy)), end_point, color=(0, 165, 255), thickness = 3, tipLength=0.2)
-                            
+        
             bbox = obj.bbox
             x1, y1, x2, y2 = bbox
             start_pt = tuple((int(x1), int(y1)))
@@ -320,81 +323,13 @@ class ACF_Detector():
             text_xy = [0, 0]
             text_xy[0] = int(max((x1 + x2) / 2 - 18, 0))
             text_xy[1] = int(max(y1 - 18, 0))
-            rgb_img = cv2.putText(rgb_img, obj.name, (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0)) 
-    
-        # imgs = []
-        # for i, (p,t) in enumerate(zip(proposals, targets)):
-        #     num_prop = p['scores'].size(0)
-        #     if num_prop < 1:
-        #         imgs.append((orig, 0, orig))
-        #     scores = p['scores'].chunk(num_prop)
-        #     masks = p['masks'].chunk(num_prop)
-        #     boxes = p['boxes'].chunk(num_prop)
-        #     labels = p['labels'].chunk(num_prop)
-        #     keypoints_3d = p['keypoints_3d']
-        #     fx, fy, cx, cy = self.camera_matrix[0, 0], self.camera_matrix[1, 1], self.camera_matrix[0, 2], self.camera_matrix[1, 2]
-        #     if keypoints_3d is not None:
-        #         keypoints_x = keypoints_3d[:, 0] / keypoints_3d[:, 2] * fx + cx
-        #         keypoints_y = keypoints_3d[:, 1] / keypoints_3d[:, 2] * fy + cy
-        #         keypoints = torch.stack((keypoints_x, keypoints_y), dim=1).cpu()
-
-        #     axis = p['axis']
-        #     if axis is not None:
-        #         if t is not None:
-        #             target_axis_keypoints = t['axis_keypoints']
-        #             t_keypoints_x = target_axis_keypoints[..., 0] / target_axis_keypoints[..., 2] * fx + cx
-        #             t_keypoints_y = target_axis_keypoints[..., 1] / target_axis_keypoints[..., 2] * fy + cy
-        #             target_axis_kp = torch.stack((t_keypoints_x, t_keypoints_y), dim=2)
-        #     for i in range(len(scores)):
-        #         s, m, b, l = scores[i], masks[i], boxes[i], labels[i]
-        #         s, m, b, l = s.squeeze(0).cpu().numpy(), m.squeeze().cpu().numpy(), b.squeeze(0).cpu().numpy(), \
-        #                     l.cpu().numpy()[0]
-        #         if keypoints_3d is not None:
-        #             k = keypoints[i].squeeze().cpu().numpy()
-                
-        #         #put bboxes on image
-        #         x1, y1, x2, y2 = b
-        #         start_pt = (x1, y1)
-        #         end_pt = (x2,y2)
-        #         cv2.rectangle(rgb_img,start_pt,end_pt,(255,255,255), thickness=2)
-        #         text_xy = b[:2]
-        #         text_xy[0] = max((x1 + x2) / 2 - 18, 0)
-        #         if l == 2:
-        #             text_xy[0] = max((x1 + x2) / 2 - 25, 0)
-        #         text_xy[1] = max(y1 - 18, 0)
-        #         cv2.putText(rgb_img, self.classes_inverse[l], (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,0,0))
-        #         if keypoints_3d is not None:
-        #             rgb_img = cv2.circle(rgb_img, tuple(k), 4, color=(0, 0, 255), thickness=-1)
-        #         if axis is not None:
-        #             length = 10
-        #             one_axis = axis[i].cpu().numpy()
-        #             center_keypoint = keypoints_3d[i].squeeze().cpu().numpy()
-        #             another_keypoint = center_keypoint + length * one_axis
-        #             project_2d_x = another_keypoint[0] / another_keypoint[2] * fx + cx
-        #             project_2d_y = another_keypoint[1] / another_keypoint[2] * fy + cy
-        #             end_point = (int(project_2d_x), int(project_2d_y))
-        #             rospy.logwarn("one_axis is = {}".format(one_axis))
-        #             rospy.logwarn("center_kp is = {}".format(center_keypoint))
-        #             rospy.logwarn("keypoints_3d[i] is {}".format(keypoints_3d[i]))
-        #             rospy.logwarn("another_kp is = {}".format(another_keypoint))
-        #             rgb_img = cv2.arrowedLine(rgb_img, tuple((k).astype("int")), end_point, color=(0, 165, 255), thickness = 3, tipLength=0.2)
-                            
-        #         if axis is not None and t is not None:
-        #             for takp in target_axis_kp:
-        #                 takp = takp.cpu().numpy()
-        #                 start_point = (takp[0, 0], takp[0, 1])
-        #                 end_point = (takp[1, 0], takp[1, 1])
-        #                 rgb_img = cv2.arrowedLine(rgb_img, start_point, end_point, (0, 255, 0), 3, tipLength=0.2)
-
+            rgb_img = cv2.putText(rgb_img, obj.name, (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,255,0)) 
+        
         self.image_pub.publish(self.bridge.cv2_to_imgmsg(rgb_img))
         # if not cv2.imwrite("/home/cuhsailus/Desktop/on_bot/{}.png".format(self.i), rgb_img):
         #     raise Exception("Could not write to loc")
         rospy.logwarn("Done visualizing")
 
-
-
-
-    
     def depth2normal(self, d_im):
         d_im = d_im.astype("float32")
         # zy, zx = np.gradient(d_im)

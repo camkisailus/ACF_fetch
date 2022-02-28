@@ -23,7 +23,7 @@ class MoveGroup():
         group_name = "arm"
         self.move_group = moveit_commander.MoveGroupCommander(group_name)
         self.move_group.set_goal_position_tolerance(.03)
-        self.move_group.set_goal_orientation_tolerance(.5)
+        self.move_group.set_goal_orientation_tolerance(.02)
         self.move_group.clear_pose_targets()
         self.display_traj_pub = rospy.Publisher("/move_group/display_planned_path", moveit_msgs.msg.DisplayTrajectory, queue_size=20)
         self.grasp_sub = rospy.Subscriber("/move_group/grasp_pose", geometry_msgs.msg.PoseStamped, self.grasp_cb)
@@ -34,7 +34,7 @@ class MoveGroup():
         self.high_dark_circle_table_height = 0.75
         # Give things time to initialize
         rospy.sleep(2)
-        # self.add_table()
+        self.add_table()
 
     def pour_cb(self, msg):
         rospy.logwarn("Got pour msg: {}".format(msg))
@@ -49,8 +49,8 @@ class MoveGroup():
         contain_obj_pose_stamped.header.frame_id = "/base_link"
         contain_obj_pose_stamped.pose = contain_obj_pose
 
-        # self.add_object_to_scene('pour_obj', pour_obj_pose_stamped, (.07, .07, .2))
-        # self.add_object_to_scene('contain_obj', contain_obj_pose_stamped, (.1, .1, .05))
+        self.add_object_to_scene('pour_obj', pour_obj_pose_stamped, (.08, .08, .23))
+        self.add_object_to_scene('contain_obj', contain_obj_pose_stamped, (.1, .1, .08))
 
         # first grasp the pour object
         grasps = self.generate_grasps(pour_obj_pose_stamped, obj_type="bottle")
@@ -64,8 +64,8 @@ class MoveGroup():
         prepour_pose_stamped = geometry_msgs.msg.PoseStamped()
         prepour_pose_stamped.header.frame_id = "/base_link"
         prepour_pose_stamped.pose = contain_obj_pose_stamped.pose
-        prepour_pose_stamped.pose.position.z += 0.25
-        prepour_pose_stamped.pose.position.x -= 0.17
+        prepour_pose_stamped.pose.position.z += 0.20
+        prepour_pose_stamped.pose.position.x -= 0.20
         prepour_pose_stamped.pose.position.y -= 0.17
         prepour_pose_stamped.pose.orientation.x = 0
         prepour_pose_stamped.pose.orientation.y = 0
@@ -73,6 +73,14 @@ class MoveGroup():
         prepour_pose_stamped.pose.orientation.w = 1
         rospy.loginfo("Setting pose target to {}".format(prepour_pose_stamped))
         self.move_group.set_pose_target(prepour_pose_stamped)
+        plan = self.move_group.go(wait=True)
+        self.move_group.stop()
+        self.move_group.clear_pose_targets()
+
+        pour_pose_stamped = copy.deepcopy(prepour_pose_stamped)
+        pour_pose_stamped.pose.orientation.x = -0.7071068
+        pour_pose_stamped.pose.orientation.w = 0.7071068
+        self.move_group.set_pose_target(pour_pose_stamped)
         plan = self.move_group.go(wait=True)
         self.move_group.stop()
         self.move_group.clear_pose_targets()
@@ -120,8 +128,8 @@ class MoveGroup():
         # set post-grasp retreat up
         g_x.post_grasp_retreat.direction.header.frame_id = 'base_link' 
         g_x.post_grasp_retreat.direction.vector.z = 1.0
-        g_x.post_grasp_retreat.desired_distance = 0.15
-        g_x.post_grasp_retreat.min_distance = 0.1
+        g_x.post_grasp_retreat.desired_distance = 0.25
+        g_x.post_grasp_retreat.min_distance = 0.2
 
         # set pre-grasp posture
         g_x.pre_grasp_posture.joint_names = ['r_gripper_finger_joint', 'l_gripper_finger_joint']
@@ -145,7 +153,7 @@ class MoveGroup():
         pos.effort.append(0.0)
         g_x.grasp_posture.points.append(pos)
 
-        g_x.allowed_touch_objects = ['grasp_obj', 'gripper_link']
+        g_x.allowed_touch_objects = ['grasp_obj', '<octomap>', 'r_gripper_link', 'l_gripper_link','gripper_link']
 
         g_x.max_contact_force = 0
         grasps.append(g_x)
@@ -248,8 +256,8 @@ class MoveGroup():
             # set post-grasp retreat
             g_z.post_grasp_retreat.direction.header.frame_id = 'base_link' 
             g_z.post_grasp_retreat.direction.vector.z = 1.0
-            g_z.post_grasp_retreat.desired_distance = 0.15
-            g_z.post_grasp_retreat.min_distance = 0.1
+            g_z.post_grasp_retreat.desired_distance = 0.25
+            g_z.post_grasp_retreat.min_distance = 0.2
 
             # set pre-grasp posture
             g_z.pre_grasp_posture.joint_names = ['r_gripper_finger_joint', 'l_gripper_finger_joint']
@@ -268,7 +276,7 @@ class MoveGroup():
             g_z.grasp_posture.points.append(pos)
 
             
-            g_z.allowed_touch_objects = ['grasp_obj', 'gripper_link']
+            g_z.allowed_touch_objects = ['grasp_obj', '<octomap>', 'r_gripper_link', 'l_gripper_link','gripper_link']
 
             g_z.max_contact_force = 0
             grasps.append(g_z)
@@ -286,7 +294,7 @@ class MoveGroup():
         table_pose.pose.orientation.z = 0
         table_pose.pose.orientation.w = 1
         # high dark circle table
-        self.add_object_to_scene('table', table_pose, (1, 1, self.low_rectangle_table_height))
+        self.add_object_to_scene('table', table_pose, (1, 1.3, self.low_rectangle_table_height))
         # low rectangle table 
         # self.add_object_to_scene('table', table_pose, (0.65, 1.3, self.table_height))
         self.move_group.set_support_surface_name('table')

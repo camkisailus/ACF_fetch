@@ -28,9 +28,9 @@ from geometry_msgs.msg import PoseStamped, PointStamped
 
 
 RGB_IMAGE_TOPIC = "/head_camera/rgb/image_raw"
-DEPTH_IMAGE_TOPIC = "/head_camera/depth/image_raw"
+DEPTH_IMAGE_TOPIC = "/head_camera/depth_registered/image_raw"
 INPUT_MODE = "RBGD"
-CHECKPOINT_PATH = "/home/cuhsailus/Desktop/ACF_fetch/src/acf_network/src/best_loss_RGBD_epoch90.pth"
+CHECKPOINT_PATH = "/home/cuhsailus/Desktop/ACF_fetch/src/acf_network/src/best_loss_RGBD_13.pth"
 DATASET = "real_world"
 OUT_DIR = "/home/cuhsailus/Desktop/affordance_coordinate_frame/out/"
 MASK_ALPHA = 0.6
@@ -69,9 +69,13 @@ class ACF_Detector():
                    "stir": 3,
                    "head": 4}
         self.classes_inverse = {self.classes[key]: key for key in self.classes}
-        self.camera_matrix = np.array([[536.544, 0., 324.149],
-                            [0., 537.666, 224.299],
-                            [0., 0., 1.]])
+        self.camera_matrix = np.array( [[527.1341414037195, 0.0, 323.8974379222906,],
+                                [0.0, 525.9099904918304, 227.2282369544078],
+                                [0.0, 0.0, 1.0]])
+        
+        # np.array([[536.544, 0., 324.149],
+        #                     [0., 537.666, 224.299],
+        #                     [0., 0., 1.]])
         self.object_classes = {0: "mug", 1:"bottle", 2:"spoon/spatula", 3:"other_container"}
         self.current_detections = []
         self._rgb_img = None
@@ -99,26 +103,39 @@ class ACF_Detector():
             self.notified_user = True
         with self._lock:
             self._rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg)
-            self._rgb_img = cv2.cvtColor(self._rgb_img, cv2.COLOR_BGR2RGB)
-            self._depth_img = self.bridge.imgmsg_to_cv2(depth_msg)
-            t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_rgb_optical_frame')
+            # self._rgb_img = cv2.cvtColor(self._rgb_img, cv2.COLOR_BGR2RGB)
+            
+            dtype_class, channels = np.float32, 1
+            dtype = np.dtype(dtype_class)
+            dtype = dtype.newbyteorder('>' if depth_msg.is_bigendian else '<')
+            shape = (depth_msg.height, depth_msg.width, channels)
+            data = np.fromstring(depth_msg.data, dtype=dtype).reshape(shape) * 1000 # in millimeters
+            data.strides = (
+                depth_msg.step,
+                dtype.itemsize * channels,
+                dtype.itemsize
+            )
+
+            self._depth_img = data.astype('uint16')
+
+            # self._depth_img = self.bridge.imgmsg_to_cv2(depth_msg)
+           
+            # t = self.tf_listener.getLatestCommonTime('/base_link', '/head_camera_rgb_optical_frame')
             self._cam_pose = self.tf_listener.lookupTransform('/base_link', '/head_camera_rgb_optical_frame', rospy.Time(0))
+            cv2.imwrite("/home/cuhsailus/Desktop/on_bot/rgb_{}.png".format(self.i), self._rgb_img)
+            cv2.imwrite("/home/cuhsailus/Desktop/on_bot/depth_{}.png".format(self.i), self._depth_img)
+            self.i+=1
+        # self.run_detections()
             # if not self.notified_user:
             #     self.ready_pub.publish(True)
             #     rospy.logwarn("Notified user")
             #     self.notified_user = True
         
-
-    def detection_callback(self, msg):
-        rospy.logwarn("Received call to run network. Running...")
-        # print("IN CALLBACK")
-        if self._rgb_img is None or self._depth_img is None:
-            rospy.logwarn("ACF Detector hasn't gotten RGB and/or Depth imgs yet...RETURNING")
-            return
+    def run_detections(self):
         with self._lock:
             self.current_detections.clear()
             image_rgb = np.array(self._rgb_img).astype(np.float32) / 255
-            image_depth = TF.to_tensor(self._depth_img.astype(np.float32) / 10).to(self.device)
+            image_depth = TF.to_tensor(self._depth_img.astype(np.float32)/ 10).to(self.device)
             image_depth_tensor = TF.to_tensor(self.depth2normal(self._depth_img)).type(torch.float32)
             image_rgb_tensor = TF.to_tensor(image_rgb)
             img = torch.cat((image_rgb_tensor, image_depth_tensor), dim=0)
@@ -142,6 +159,16 @@ class ACF_Detector():
             self.visualize(self._rgb_img.copy())
         
         self.publish_detections()
+
+
+    def detection_callback(self, msg):
+        rospy.logwarn("Received call to run network. Running...")
+        # print("IN CALLBACK")
+        if self._rgb_img is None or self._depth_img is None:
+            rospy.logwarn("ACF Detector hasn't gotten RGB and/or Depth imgs yet...RETURNING")
+            return
+        self.run_detections()
+        
         
     def publish_detections(self):
         self.scene_obj_msgs = []
@@ -213,25 +240,25 @@ class ACF_Detector():
         axes = proposals[0]['axis'].tolist()
         keypoints_3d = proposals[0]['keypoints_3d'].tolist()
         bboxes = proposals[0]['boxes'].tolist()
-        try:
-            for i in range(len(final_pafs_pair)):
-                pair = final_pafs_pair[i][0] #final_pafs_pair is list of lists
-                kp1 = keypoints_3d[pair[0]]
-                kp2 = keypoints_3d[pair[1]]
-                ax1 = axes[pair[0]]
-                ax2 = axes[pair[1]]
-                bbox1 = bboxes[pair[0]]
-                bbox2 = bboxes[pair[1]]
-                bbox = (min(bbox1[0], bbox2[0]), min(bbox1[1], bbox2[1]), max(bbox1[2], bbox2[2]), max(bbox1[3], bbox2[3]))
-                keypoints_3d.remove(kp1)
-                keypoints_3d.remove(kp2)
-                axes.remove(ax1)
-                axes.remove(ax2)
-                bboxes.remove(bbox1)
-                bboxes.remove(bbox2)
-                self.current_detections.append(Object(self.object_classes[pair[-1]]+str(len(self.current_detections)), kp1, ax1, bbox, kp2, ax2))
-        except IndexError:
-            pass
+        # try:
+        #     for i in range(len(final_pafs_pair)):
+        #         pair = final_pafs_pair[i][0] #final_pafs_pair is list of lists
+        #         kp1 = keypoints_3d[pair[0]]
+        #         kp2 = keypoints_3d[pair[1]]
+        #         ax1 = axes[pair[0]]
+        #         ax2 = axes[pair[1]]
+        #         bbox1 = bboxes[pair[0]]
+        #         bbox2 = bboxes[pair[1]]
+        #         bbox = (min(bbox1[0], bbox2[0]), min(bbox1[1], bbox2[1]), max(bbox1[2], bbox2[2]), max(bbox1[3], bbox2[3]))
+        #         keypoints_3d.remove(kp1)
+        #         keypoints_3d.remove(kp2)
+        #         axes.remove(ax1)
+        #         axes.remove(ax2)
+        #         bboxes.remove(bbox1)
+        #         bboxes.remove(bbox2)
+        #         self.current_detections.append(Object(self.object_classes[pair[-1]]+str(len(self.current_detections)), kp1, ax1, bbox, kp2, ax2))
+        # except IndexError:
+        #     pass
         i = 0
         for ax, kp in zip(axes,keypoints_3d):
             # Set remaining kps to "other_container" as a catch all
@@ -291,7 +318,9 @@ class ACF_Detector():
         fx, fy, cx, cy = self.camera_matrix[0, 0], self.camera_matrix[1, 1], self.camera_matrix[0, 2], self.camera_matrix[1, 2]
             
 
-        for obj in self.current_detections:
+        for i, obj in enumerate(self.current_detections):
+            if i > 5:
+                break
             kp1 = obj.kp1
             kpx = kp1[0] / kp1[2] * fx + cx
             kpy = kp1[1] / kp1[2] * fy + cy        
@@ -324,7 +353,7 @@ class ACF_Detector():
             text_xy[0] = int(max((x1 + x2) / 2 - 18, 0))
             text_xy[1] = int(max(y1 - 18, 0))
             rgb_img = cv2.putText(rgb_img, obj.name, (text_xy[0],text_xy[1]), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, thickness=2, color=(0,255,0)) 
-        
+        rgb_img = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB)
         self.image_pub.publish(self.bridge.cv2_to_imgmsg(rgb_img))
         # if not cv2.imwrite("/home/cuhsailus/Desktop/on_bot/{}.png".format(self.i), rgb_img):
         #     raise Exception("Could not write to loc")
@@ -351,6 +380,6 @@ class ACF_Detector():
 if __name__ == '__main__':
     rospy.init_node('ACF_Network')
     foo = ACF_Detector()
-    r = rospy.Rate(10)
+    r = rospy.Rate(5)
     while not rospy.is_shutdown():
         r.sleep()

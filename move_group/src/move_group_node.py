@@ -11,6 +11,7 @@ from std_msgs.msg import String
 from moveit_commander.conversions import pose_to_list
 from trajectory_msgs.msg import JointTrajectoryPoint
 from acf_network.msg import SceneObject, SceneObjectArray
+import tf
 
 
 
@@ -27,82 +28,66 @@ class MoveGroup():
         self.display_traj_pub = rospy.Publisher("/move_group/display_planned_path", moveit_msgs.msg.DisplayTrajectory, queue_size=20)
         self.grasp_sub = rospy.Subscriber("/move_group/grasp_pose", geometry_msgs.msg.PoseStamped, self.grasp_cb)
         self.pour_sub = rospy.Subscriber("/move_group/pour_action_poses", geometry_msgs.msg.PoseArray, self.pour_cb)
-        self.scene_object_sub = rospy.Subscriber("/move_group/scene_objects", SceneObjectArray, self.add_scene_objects)
+        # self.scene_object_sub = rospy.Subscriber("/move_group/scene_objects", SceneObjectArray, self.add_scene_objects)
         self.waypoints = []
         self.low_rectangle_table_height = 0.62
         self.high_dark_circle_table_height = 0.75
         # Give things time to initialize
         rospy.sleep(2)
-        self.add_table()
+        # self.add_table()
 
     def pour_cb(self, msg):
+        rospy.logwarn("Got pour msg: {}".format(msg))
         pour_obj_pose = msg.poses[0]
         contain_obj_pose = msg.poses[1]
         pour_obj_pose_stamped = geometry_msgs.msg.PoseStamped()
         pour_obj_pose_stamped.header.frame_id = "/base_link"
         pour_obj_pose_stamped.pose = pour_obj_pose
-        rospy.loginfo("Pour obj pose: ({:.4f}, {:.4f}, {:.4f})".format(pour_obj_pose_stamped.pose.position.x, pour_obj_pose_stamped.pose.position.y, pour_obj_pose_stamped.pose.position.z))
-        
+
         # pour_obj_pose_stamped.pose.position.x -= 0.15
         contain_obj_pose_stamped = geometry_msgs.msg.PoseStamped()
         contain_obj_pose_stamped.header.frame_id = "/base_link"
         contain_obj_pose_stamped.pose = contain_obj_pose
 
-        self.add_object_to_scene('pour_obj', pour_obj_pose_stamped, (.05, .05, .3))
-        self.add_object_to_scene('contain_obj', contain_obj_pose_stamped, (.1, .1, .05))
+        # self.add_object_to_scene('pour_obj', pour_obj_pose_stamped, (.07, .07, .2))
+        # self.add_object_to_scene('contain_obj', contain_obj_pose_stamped, (.1, .1, .05))
 
         # first grasp the pour object
-        rospy.loginfo("Pour obj pose: ({:.4f}, {:.4f}, {:.4f})".format(pour_obj_pose_stamped.pose.position.x, pour_obj_pose_stamped.pose.position.y, pour_obj_pose_stamped.pose.position.z))
-        grasps = self.generate_grasps(pour_obj_pose_stamped, obj_type="mug")
+        grasps = self.generate_grasps(pour_obj_pose_stamped, obj_type="bottle")
         rospy.sleep(2)
         self.fetch.arm.pick('pour_obj', grasps)
         rospy.sleep(5) # sleep for 5 s to allow arm to grasp pour_obj... there is no wait=True argument for pick()
 
-        # # cartesian move to contain obj + some z
-        prepour_pose = contain_obj_pose_stamped.pose
-        prepour_pose.position.z += 0.15
-        prepour_pose.position.x -= 0.17 # cartesian path plans in wrist_roll_link frame, subtract the hand link length for EE positon
-        prepour_pose.position.y -= 0.1
-        # prepour_pose.position.y -= 0.1
-        prepour_pose.orientation.x = 0
-        prepour_pose.orientation.y = 0
-        prepour_pose.orientation.z = 0
-        prepour_pose.orientation.w = 1
 
-        rospy.loginfo("Prepour pose: ({}, {}, {})".format(prepour_pose.position.x, prepour_pose.position.y, prepour_pose.position.z))
-        
-        # rospy.loginfo("Prepour pose:\n{}".format(prepour_pose))
-        # self.move_group.set_pose_target(prepour_pose, end_effector_link="gripper_link")
-        # plan = self.move_group.go(wait= True)
-        # self.move_group.stop()
-        # self.move_group.clear_pose_targets()
-        # waypoints = [self.move_group.get_current_pose().pose, prepour_pose]
-        plan, _ = self.move_group.compute_cartesian_path([prepour_pose], 0.01, 0.0)
-        self.move_group.execute(plan, wait=True)
 
-        pour_pose = copy.deepcopy(prepour_pose)
-        pour_pose.orientation.w = 0.6755
-        pour_pose.orientation.x = -0.7373
-        plan, _ = self.move_group.compute_cartesian_path([pour_pose], 0.01, 0.0)
-        self.move_group.execute(plan, wait=True)
 
-        # rospy.loginfo("Pour pose:\n{}".format(pour_pose))
-        # self.move_group.set_pose_target(pour_pose, end_effector_link="gripper_link")
-        # plan = self.move_group.go(wait=True)
-        # self.move_group.stop()
-        # self.move_group.clear_pose_targets()
+        prepour_pose_stamped = geometry_msgs.msg.PoseStamped()
+        prepour_pose_stamped.header.frame_id = "/base_link"
+        prepour_pose_stamped.pose = contain_obj_pose_stamped.pose
+        prepour_pose_stamped.pose.position.z += 0.25
+        prepour_pose_stamped.pose.position.x -= 0.17
+        prepour_pose_stamped.pose.position.y -= 0.17
+        prepour_pose_stamped.pose.orientation.x = 0
+        prepour_pose_stamped.pose.orientation.y = 0
+        prepour_pose_stamped.pose.orientation.z = 0
+        prepour_pose_stamped.pose.orientation.w = 1
+        rospy.loginfo("Setting pose target to {}".format(prepour_pose_stamped))
+        self.move_group.set_pose_target(prepour_pose_stamped)
+        plan = self.move_group.go(wait=True)
+        self.move_group.stop()
+        self.move_group.clear_pose_targets()
 
         
     def grasp_cb(self, msg):
         # add object to be grasped to scene
-        # self.add_object_to_scene('grasp_obj', msg, (0.0254, 0.0254, .2))
+        self.add_object_to_scene('grasp_obj', msg, (0.0254, 0.0254, .2))
         # rospy.sleep(2)
         rospy.loginfo(msg)
-        grasps = self.generate_grasps(msg, obj_type="mug")
+        grasps = self.generate_grasps(msg, obj_type="bottle")
         # rospy.loginfo(grasps)     
 
         rospy.sleep(2)
-        self.fetch.arm.pick('mug0', grasps)
+        self.fetch.arm.pick('grasp_obj', grasps)
 
 
     def generate_grasps(self, pose_stamped, obj_type):
@@ -112,20 +97,27 @@ class MoveGroup():
         grasp_pose = pose_stamped
         # grasp_pose.pose.position.x -= 0.17 # moveit plans in wrist_roll_link subtract 17 for ee link
         if obj_type == "bottle":
-            grasp_pose.pose.position.x -= 0.07
+            grasp_pose.pose.position.x -= 0.13
+            grasp_pose.pose.position.z += 0.02
+            grasp_pose.pose.orientation.x = 0
+            grasp_pose.pose.orientation.y = 0
+            grasp_pose.pose.orientation.z = 0
+            grasp_pose.pose.orientation.w = 1
         elif obj_type == "mug":
             grasp_pose.pose.position.x -= .12
             grasp_pose.pose.position.y -= 0.02
+
+        # Always try grasp along x direction in base link
         # set grasp_pose
         g_x.grasp_pose = grasp_pose
 
         # define pre-grasp approach
-        g_x.pre_grasp_approach.direction.header.frame_id = 'base_link'
+        g_x.pre_grasp_approach.direction.header.frame_id = 'gripper_link'
         g_x.pre_grasp_approach.direction.vector.x = 1.0
         g_x.pre_grasp_approach.min_distance = 0.15 # m
         g_x.pre_grasp_approach.desired_distance = 0.17 # m
 
-        # set post-grasp retreat
+        # set post-grasp retreat up
         g_x.post_grasp_retreat.direction.header.frame_id = 'base_link' 
         g_x.post_grasp_retreat.direction.vector.z = 1.0
         g_x.post_grasp_retreat.desired_distance = 0.15
@@ -141,6 +133,7 @@ class MoveGroup():
         else:
             pos.positions.append(0.5)
             pos.positions.append(0.5)
+            pos.time_from_start = rospy.Duration(3)
         g_x.pre_grasp_posture.points.append(pos)
 
         # set grasp posture
@@ -152,7 +145,7 @@ class MoveGroup():
         pos.effort.append(0.0)
         g_x.grasp_posture.points.append(pos)
 
-        g_x.allowed_touch_objects = ['mug0', 'r_gripper_finger_joint', 'l_gripper_finger_joint', 'gripper_link']
+        g_x.allowed_touch_objects = ['grasp_obj', 'gripper_link']
 
         g_x.max_contact_force = 0
         grasps.append(g_x)
@@ -249,30 +242,33 @@ class MoveGroup():
             # define pre-grasp approach
             g_z.pre_grasp_approach.direction.header.frame_id = 'gripper_link'
             g_z.pre_grasp_approach.direction.vector.z = -1.0
-            g_z.pre_grasp_approach.min_distance = 0.1 # m
-            g_z.pre_grasp_approach.desired_distance = 0.15 # m
+            g_z.pre_grasp_approach.min_distance = 0.15 # m
+            g_z.pre_grasp_approach.desired_distance = 0.17 # m
 
             # set post-grasp retreat
             g_z.post_grasp_retreat.direction.header.frame_id = 'base_link' 
             g_z.post_grasp_retreat.direction.vector.z = 1.0
-            g_z.post_grasp_retreat.desired_distance = 0.13
+            g_z.post_grasp_retreat.desired_distance = 0.15
             g_z.post_grasp_retreat.min_distance = 0.1
 
             # set pre-grasp posture
             g_z.pre_grasp_posture.joint_names = ['r_gripper_finger_joint', 'l_gripper_finger_joint']
             pos = JointTrajectoryPoint()
-            pos.positions.append(0.1) #TODO: Check this value
+            pos.positions.append(0.05) 
+            pos.positions.append(0.05)
             g_z.pre_grasp_posture.points.append(pos)
 
             # set grasp posture
             g_z.grasp_posture.joint_names = ['r_gripper_finger_joint', 'l_gripper_finger_joint']
             pos = JointTrajectoryPoint()
-            pos.positions.append(0.0) #TODO: Check this value
+            pos.positions.append(0.0)
+            pos.positions.append(0.0)
+            pos.effort.append(0.0)
             pos.effort.append(0.0)
             g_z.grasp_posture.points.append(pos)
 
             
-            g_z.allowed_touch_objects = ['grasp_obj', 'r_gripper_finger_link', 'l_gripper_finger_link']
+            g_z.allowed_touch_objects = ['grasp_obj', 'gripper_link']
 
             g_z.max_contact_force = 0
             grasps.append(g_z)
@@ -284,26 +280,26 @@ class MoveGroup():
         table_pose.header.frame_id = '/base_link'
         table_pose.pose.position.x = .9
         table_pose.pose.position.y = 0
-        table_pose.pose.position.z = self.high_dark_circle_table_height/2
+        table_pose.pose.position.z = self.low_rectangle_table_height/2
         table_pose.pose.orientation.x = 0
         table_pose.pose.orientation.y = 0
         table_pose.pose.orientation.z = 0
         table_pose.pose.orientation.w = 1
         # high dark circle table
-        self.add_object_to_scene('table', table_pose, (1.2, 1.2, self.high_dark_circle_table_height))
+        self.add_object_to_scene('table', table_pose, (1, 1, self.low_rectangle_table_height))
         # low rectangle table 
         # self.add_object_to_scene('table', table_pose, (0.65, 1.3, self.table_height))
         self.move_group.set_support_surface_name('table')
 
-    def add_scene_objects(self, msg):
-        for obj in msg.scene_objects:
-            obj_body_pose = obj.kp1
-            if obj.name.startswith("OC"):
-                obj_size = (0.05, 0.05, 0.1)
-
-            elif obj.name.startswith("mug"):
-                object_size = (0, 0, 0)
-            self.add_object_to_scene(obj.name, obj_body_pose, object_size)
+    # def add_scene_objects(self, msg):
+    #     for obj in msg.scene_objects:
+    #         obj_body_pose = obj.kp1
+    #         # if obj.name.startswith("OC"):
+    #         #     obj_size = (0.05, 0.05, 0.1)
+    #         # elif obj.name.startswith("mug"):
+    #         #     object_size = (0, 0, 0)
+    #         object_size = (0.05, 0.05, 0.1)
+    #         self.add_object_to_scene(obj.name, obj_body_pose, object_size)
 
     def add_object_to_scene(self, object_name, object_pose, object_size):
         object_pose.pose.orientation.x = 0
@@ -313,7 +309,7 @@ class MoveGroup():
         if object_name.endswith("_obj"):
             # this is an object that goes on the table
             pose_with_buffer = copy.deepcopy(object_pose)
-            pose_with_buffer.pose.position.z = object_size[2]/2 + self.high_dark_circle_table_height + 0.05 # 0.05 is some buffer so moveit does not complain about collision between objects in scene
+            pose_with_buffer.pose.position.z = object_size[2]/2 + self.low_rectangle_table_height + 0.003 # 0.003 is some buffer so moveit does not complain about collision between objects in scene
             self.scene.add_box(object_name, pose_with_buffer, object_size)        
         else:
             self.scene.add_box(object_name, object_pose, object_size)

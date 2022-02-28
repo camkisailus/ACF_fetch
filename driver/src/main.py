@@ -74,9 +74,15 @@ class StateMachine():
         choice = int(input("Which object would you like to grasp? "))
         self.obj_to_grasp = self.obj_map[choice]
         print("User selection: {}".format(self.obj_to_grasp.name))
+        print(self.obj_to_grasp)
         grasp_pose_stamped = self.calculate_grasp_pose()
-        grasp_pose_stamped.pose.orientation.w = 1
-        print("Grasp pose calculated. position = ({}, {}, {}) and orientation = ({}, {}, {})".format(grasp_pose_stamped.pose.position.x, grasp_pose_stamped.pose.position.y, grasp_pose_stamped.pose.position.z, grasp_pose_stamped.pose.orientation.x, grasp_pose_stamped.pose.orientation.y, grasp_pose_stamped.pose.orientation.z, grasp_pose_stamped.pose.orientation.w))
+        # grasp_pose_stamped.pose.orientation.w = 1
+        # grasp_pose_stamped.pose.orientation.x = -.5
+        # grasp_pose_stamped.pose.orientation.y = .5
+        # grasp_pose_stamped.pose.orientation.z = .5
+        # grasp_pose_stamped.pose.orientation.w = .5
+        # grasp_pose_stamped.pose.position.z += 0.1
+        print("Grasp pose calculated. position = ({}, {}, {}) and orientation = ({}, {}, {}, {})".format(grasp_pose_stamped.pose.position.x, grasp_pose_stamped.pose.position.y, grasp_pose_stamped.pose.position.z, grasp_pose_stamped.pose.orientation.x, grasp_pose_stamped.pose.orientation.y, grasp_pose_stamped.pose.orientation.z, grasp_pose_stamped.pose.orientation.w))
         scene_objs_arr = SceneObjectArray()
         scene_objs_arr.scene_objects.append(self.obj_to_grasp)
         self.scene_object_pub.publish(scene_objs_arr)
@@ -96,13 +102,12 @@ class StateMachine():
         self.obj_to_grasp = pour_obj
         pour_obj_grasp_pose_stamped = self.calculate_grasp_pose()
         pour_obj_grasp_pose = pour_obj_grasp_pose_stamped.pose
-        self.obj_to_grasp = contain_obj
-        contain_obj_grasp_pose_stamped = self.calculate_grasp_pose()
-        contain_obj_grasp_pose = contain_obj_grasp_pose_stamped.pose
+        print("contain obj pose is {}".format(contain_obj.kp1.pose))
+ 
         pose_arr_msg = PoseArray()
         pose_arr_msg.header.frame_id = "/base_link"
         pose_arr_msg.poses.append(pour_obj_grasp_pose)
-        pose_arr_msg.poses.append(contain_obj_grasp_pose)
+        pose_arr_msg.poses.append(contain_obj.kp1.pose)
         self.pour_pub.publish(pose_arr_msg)
 
     
@@ -139,14 +144,15 @@ class StateMachine():
 
         elif self.obj_to_grasp.name.startswith("mug"):
             print(self.obj_to_grasp)
-            body_acf = self.obj_to_grasp.kp1.pose
+            
             handle_acf = self.obj_to_grasp.kp2.pose
             handle_axis = R.from_quat([handle_acf.orientation.x, handle_acf.orientation.y, handle_acf.orientation.z, handle_acf.orientation.w])
             handle_axis = handle_axis.as_euler('xyz', degrees=False)
-            handle_axis_list = [handle_axis[i] for i in range(3)]
-            body_axis = R.from_quat([body_acf.orientation.x, body_acf.orientation.y, body_acf.orientation.z, handle_acf.orientation.w])
+
+            body_acf = self.obj_to_grasp.kp1.pose
+            body_axis = R.from_quat([body_acf.orientation.x, body_acf.orientation.y, body_acf.orientation.z, body_acf.orientation.w]) ## JUST CHANGED THIS. IF IT STOPS WORKING CHANGE BACK TO HANDLE_ACF.OR.W
             body_axis = body_axis.as_euler('xyz', degrees=False)
-            body_axis_list = [body_axis[i] for i in range(3)]
+
 
 
             grasp_z_axis = np.cross(handle_axis, body_axis)
@@ -167,7 +173,42 @@ class StateMachine():
             grasp_pose_stamped.pose.position.y = handle_acf.position.y #- 0.1#- handle_offset_vector[1]
             grasp_pose_stamped.pose.position.z = handle_acf.position.z #- handle_offset_vector[2]
             rospy.loginfo("grasp_pose positions ({:.4f}, {:.4f}, {:.4f})".format(grasp_pose_stamped.pose.position.x, grasp_pose_stamped.pose.position.y, grasp_pose_stamped.pose.position.z))
-            
+            grasp_pose_stamped.pose.orientation.x = grasp_pose_quat[0]
+            grasp_pose_stamped.pose.orientation.y = grasp_pose_quat[1]
+            grasp_pose_stamped.pose.orientation.z = -grasp_pose_quat[2]
+            grasp_pose_stamped.pose.orientation.w = grasp_pose_quat[3]
+
+        elif self.obj_to_grasp.name.startswith("spoon"):
+            handle_acf = self.obj_to_grasp.kp1.pose
+            handle_axis = R.from_quat([handle_acf.orientation.x, handle_acf.orientation.y, handle_acf.orientation.z, handle_acf.orientation.w])
+            handle_axis = handle_axis.as_euler('xyz', degrees=False)
+
+            stir_acf = self.obj_to_grasp.kp2.pose
+            stir_axis = R.from_quat([stir_acf.orientation.x, stir_acf.orientation.y, stir_acf.orientation.z, stir_acf.orientation.w])
+            stir_axis = stir_axis.as_euler('xyz', degrees=False)
+
+            grasp_z_axis = -stir_axis
+            grasp_y_axis = handle_axis
+            grasp_x_axis = np.cross(grasp_y_axis, grasp_z_axis)
+
+            grasp_pose_mat = np.vstack((grasp_x_axis, grasp_y_axis, grasp_z_axis)).T
+            r = R.from_matrix(grasp_pose_mat)
+            grasp_pose_quat = r.as_quat()
+            grasp_pose_stamped = PoseStamped()
+            grasp_pose_stamped.header.frame_id = '/base_link'
+            grasp_pose_stamped.header.stamp = rospy.Time.now()
+            # calculate handle offset
+            grasp_pose_stamped.pose.position.x = handle_acf.position.x #- handle_offset_vector[0]
+            grasp_pose_stamped.pose.position.y = handle_acf.position.y #- 0.1#- handle_offset_vector[1]
+            grasp_pose_stamped.pose.position.z = handle_acf.position.z #- handle_offset_vector[2]
+            grasp_pose_stamped.pose.orientation.x = grasp_pose_quat[0]
+            grasp_pose_stamped.pose.orientation.y = grasp_pose_quat[1]
+            grasp_pose_stamped.pose.orientation.z = -grasp_pose_quat[2]
+            grasp_pose_stamped.pose.orientation.w = grasp_pose_quat[3]
+            rospy.loginfo("grasp pose positions: ({}, {}, {})".format(grasp_pose_stamped.pose.position.x, grasp_pose_stamped.pose.position.y, grasp_pose_stamped.pose.position.z))
+            rospy.loginfo("grasp pose quat: ({}, {}, {}, {})".format(grasp_pose_stamped.pose.orientation.x,grasp_pose_stamped.pose.orientation.y, grasp_pose_stamped.pose.orientation.z, grasp_pose_stamped.pose.orientation.w))
+
+
 
         return grasp_pose_stamped
     
